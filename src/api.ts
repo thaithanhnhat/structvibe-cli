@@ -1,5 +1,5 @@
 import { REPOSITORY_PROFILE_VERSION } from "./repository/index";
-import type { CliCredential, SnapshotResponse } from "./types";
+import type { CliCredential, RepositoryPackResponse, SnapshotResponse } from "./types";
 
 export class CliApiError extends Error {
   constructor(
@@ -111,5 +111,25 @@ export function fetchSnapshot(credential: CliCredential, projectRef: string, bra
   ).then((snapshot) => {
     validateRepositoryProfile(snapshot.repositoryProfileVersion);
     return snapshot;
+  });
+}
+
+export function fetchRepositoryPack(
+  credential: CliCredential,
+  projectRef: string,
+  have: readonly string[] = []
+) {
+  return apiRequest<RepositoryPackResponse>(
+    credential.server,
+    `/api/cli/projects/${encodeURIComponent(projectRef)}/pack`,
+    {
+      method: "POST",
+      body: JSON.stringify({ have: have.slice(0, 100_000) }),
+      signal: AbortSignal.timeout(120_000)
+    },
+    credential.token
+  ).then((pack) => {
+    validateRepositoryProfile(pack.repositoryProfileVersion);
+    return pack;
   });
 }

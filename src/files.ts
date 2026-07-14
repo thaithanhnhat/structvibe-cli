@@ -128,10 +128,55 @@ async function pruneObjects(root: string, retained: ReadonlySet<string>) {
 }
 
 export async function writeBaseFiles(root: string, files: readonly RepositoryFile[]) {
-  const retained = new Set<string>();
-  for (const file of files) retained.add(await writeObject(root, file.content));
-  await pruneObjects(root, retained);
+  for (const file of files) await writeObject(root, file.content);
   await rm(checkoutBasePath(root), { recursive: true, force: true });
+}
+
+export async function writeRepositoryObjects(
+  root: string,
+  objects: readonly { hash: string; content: string }[]
+) {
+  for (const object of objects) {
+    if (hashRepositoryContent(object.content) !== object.hash) {
+      throw new Error(`StructVibe object '${object.hash}' failed its transfer hash check.`);
+    }
+    const storedHash = await writeObject(root, object.content);
+    if (storedHash !== object.hash) {
+      throw new Error(`StructVibe object '${object.hash}' was stored under an unexpected hash.`);
+    }
+  }
+}
+
+export async function listStoredObjectHashes(root: string) {
+  const objects = checkoutObjectsPath(root);
+  const hashes: string[] = [];
+  let prefixes: Dirent<string>[];
+  try {
+    prefixes = await readdir(objects, { withFileTypes: true });
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return hashes;
+    throw error;
+  }
+  for (const prefix of prefixes) {
+    if (!prefix.isDirectory() || !/^[a-f0-9]{2}$/u.test(prefix.name)) continue;
+    const directory = join(objects, prefix.name);
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const match = entry.isFile() ? entry.name.match(/^([a-f0-9]{62})\.br$/u) : null;
+      const hash = match?.[1] ? `${prefix.name}${match[1]}` : null;
+      if (!hash) continue;
+      try {
+        await readObject(root, hash);
+        hashes.push(hash);
+      } catch {
+        await rm(join(directory, entry.name), { force: true });
+      }
+    }
+  }
+  return hashes.sort();
+}
+
+export function pruneStoredObjects(root: string, trees: readonly RepositoryTree[]) {
+  return pruneObjects(root, new Set(trees.flatMap((tree) => Object.values(tree))));
 }
 
 export async function readBaseFiles(root: string, tree: RepositoryTree): Promise<RepositoryFile[]> {
@@ -154,7 +199,6 @@ export async function readBaseFiles(root: string, tree: RepositoryTree): Promise
       return { path, content, mediaType: repositoryMediaType(path) };
     })
   );
-  await pruneObjects(root, new Set(Object.values(tree)));
   await rm(checkoutBasePath(root), { recursive: true, force: true });
   return files;
 }

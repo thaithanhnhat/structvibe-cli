@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fetchCliIdentity, fetchSnapshot, startDeviceAuthorization } from "./api";
+import { fetchCliIdentity, fetchRepositoryPack, fetchSnapshot, startDeviceAuthorization } from "./api";
 import { REPOSITORY_PROFILE_VERSION } from "./repository/index";
 import type { CliCredential, SnapshotResponse } from "./types";
 
@@ -48,6 +48,31 @@ test("stops before using a repository profile the CLI does not understand", asyn
       fetchSnapshot(credential, "project", "main"),
       (error: unknown) => error instanceof Error && "code" in error && error.code === "REPOSITORY_PROFILE_MISMATCH"
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetches a deduplicated repository pack with the local have set", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    assert.equal(String(input), "https://structvibe.test/api/cli/projects/project/pack");
+    assert.equal(init?.method, "POST");
+    assert.deepEqual(JSON.parse(String(init?.body)), { have: ["a".repeat(64)] });
+    return Response.json({
+      ok: true,
+      repositoryProfileVersion: REPOSITORY_PROFILE_VERSION,
+      project: { id: "project-id", name: "Project", slug: "project" },
+      branches: [],
+      commits: [],
+      objects: [],
+      objectCount: 1,
+      transferredObjectCount: 0
+    });
+  };
+  try {
+    const result = await fetchRepositoryPack(credential, "project", ["a".repeat(64)]);
+    assert.equal(result.transferredObjectCount, 0);
   } finally {
     globalThis.fetch = originalFetch;
   }

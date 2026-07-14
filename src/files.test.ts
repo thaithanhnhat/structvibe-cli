@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { RepositoryFile } from "./repository/index";
 import { hashRepositoryContent } from "./repository/index";
-import { readBaseFiles, restoreWorkingPaths, treeForFiles, writeBaseFiles } from "./files";
+import { pruneStoredObjects, readBaseFiles, restoreWorkingPaths, treeForFiles, writeBaseFiles } from "./files";
 
 function file(path: string, content: string): RepositoryFile {
   return { path, content, mediaType: "text/markdown" };
@@ -86,6 +86,7 @@ test("pruning objects also removes empty hash prefix directories", async (contex
 
   await writeBaseFiles(root, [retained, file("decisions/DEC-001.md", "orphaned")]);
   await writeBaseFiles(root, [retained]);
+  await pruneStoredObjects(root, [treeForFiles([retained])]);
 
   const prefixes = await readdir(join(root, ".structvibe", "objects"));
   assert.deepEqual(prefixes, [hashRepositoryContent(retained.content).slice(0, 2)]);

@@ -10,7 +10,7 @@ import {
   CliApiError,
   exchangeDeviceAuthorization,
   fetchCliIdentity,
-  fetchSnapshot,
+  fetchRepositoryPack,
   startDeviceAuthorization,
   validateRepositoryProfile,
   type CliIdentityResponse,
@@ -37,10 +37,23 @@ import {
 } from "./files";
 import { print, printError } from "./output";
 import { startPreviewServer } from "./preview";
-import type { CheckoutState, CliCredential, PendingCommit, SnapshotResponse } from "./types";
+import {
+  ensureRepositoryCache,
+  listRefs,
+  listStoredObjectHashes,
+  normalizeBranchRef,
+  pruneRepositoryCache,
+  readCommit,
+  readRef,
+  removeRef,
+  setHead,
+  storeRepositoryPack,
+  trackRemoteBranch
+} from "./repository-cache";
+import type { CheckoutState, CliCredential, PendingCommit } from "./types";
 
 const program = new Command();
-program.name("sv").description("StructVibe repository CLI").version("0.2.0").option("--json", "machine-readable output");
+program.name("sv").description("StructVibe repository CLI").version("0.3.0").option("--json", "machine-readable output");
 const jsonOutput = () => Boolean(program.opts().json);
 
 async function ensureEmptyDirectory(path: string) {
@@ -53,22 +66,45 @@ async function ensureEmptyDirectory(path: string) {
   }
 }
 
-async function checkoutSnapshot(root: string, credential: CliCredential, snapshot: SnapshotResponse) {
-  await writeWorkingFiles(root, snapshot.files, true);
-  await writeBaseFiles(root, snapshot.files);
-  const state: CheckoutState = {
-    schemaVersion: 1,
-    server: credential.server,
-    projectId: snapshot.project.id,
-    projectSlug: snapshot.project.slug,
-    projectName: snapshot.project.name,
-    branch: snapshot.branch.name,
-    baseCommitId: snapshot.commit.id,
-    baseTree: snapshot.commit.tree
+async function fetchAndStorePack(
+  root: string,
+  state: CheckoutState,
+  credential: CliCredential
+) {
+  await ensureRepositoryCache(root, state);
+  const have = await listStoredObjectHashes(root);
+  const pack = await fetchRepositoryPack(credential, state.projectId, have);
+  await storeRepositoryPack(root, pack);
+  await pruneRepositoryCache(root);
+  return pack;
+}
+
+async function cachedBranchCommit(root: string, branch: string) {
+  const name = normalizeBranchRef(branch);
+  const local = await readRef(root, "local", name) ?? await trackRemoteBranch(root, name);
+  if (!local) return null;
+  const commit = await readCommit(root, local.commitId);
+  return commit ? { ref: local, commit } : null;
+}
+
+async function checkoutCachedBranch(root: string, state: CheckoutState, branch: string) {
+  const name = normalizeBranchRef(branch);
+  const cached = await cachedBranchCommit(root, name);
+  if (!cached) throw new Error(`Branch '${name}' is not available locally. Run 'sv fetch' first.`);
+  const files = await readBaseFiles(root, cached.commit.tree);
+  await writeWorkingFiles(root, files, true);
+  await writeBaseFiles(root, files);
+  const next: CheckoutState = {
+    ...state,
+    branch: name,
+    baseCommitId: cached.commit.id,
+    baseTree: cached.commit.tree
   };
-  await saveCheckout(root, state);
+  await saveCheckout(root, next);
+  await setHead(root, name);
   await rm(pendingCommitPath(root), { force: true });
-  return state;
+  await pruneRepositoryCache(root);
+  return next;
 }
 
 async function localChanges(root: string) {
@@ -199,22 +235,39 @@ program
   .option("-b, --branch <branch>", "branch to clone", "main")
   .action(async (project: string, directory: string | undefined, options: { branch: string }) => {
     const credential = await readCredential();
-    const snapshot = await fetchSnapshot(credential, project, options.branch);
-    const root = resolve(directory ?? snapshot.project.slug);
+    const pack = await fetchRepositoryPack(credential, project);
+    const selectedName = normalizeBranchRef(options.branch);
+    const selectedBranch = pack.branches.find((branch) => branch.name === selectedName);
+    if (!selectedBranch) throw new Error(`Branch '${selectedName}' was not found in this project.`);
+    const selectedCommit = pack.commits.find((commit) => commit.id === selectedBranch.headCommitId);
+    if (!selectedCommit) throw new Error(`Clone pack is missing commit '${selectedBranch.headCommitId}'.`);
+    const root = resolve(directory ?? pack.project.slug);
     await ensureEmptyDirectory(root);
-    await writeWorkingFiles(root, snapshot.files);
-    await writeBaseFiles(root, snapshot.files);
-    await saveCheckout(root, {
+    await storeRepositoryPack(root, pack);
+    const tracked = await trackRemoteBranch(root, selectedBranch.name);
+    if (!tracked) throw new Error(`Clone pack is missing branch '${selectedBranch.name}'.`);
+    const files = await readBaseFiles(root, selectedCommit.tree);
+    await writeWorkingFiles(root, files);
+    await writeBaseFiles(root, files);
+    const state: CheckoutState = {
       schemaVersion: 1,
       server: credential.server,
-      projectId: snapshot.project.id,
-      projectSlug: snapshot.project.slug,
-      projectName: snapshot.project.name,
-      branch: snapshot.branch.name,
-      baseCommitId: snapshot.commit.id,
-      baseTree: snapshot.commit.tree
-    });
-    print(jsonOutput() ? { ok: true, directory: root, project: snapshot.project, branch: snapshot.branch.name, commit: snapshot.commit.id } : `Cloned ${snapshot.project.name} (${snapshot.branch.name}) into ${root}.`, jsonOutput());
+      projectId: pack.project.id,
+      projectSlug: pack.project.slug,
+      projectName: pack.project.name,
+      branch: selectedBranch.name,
+      baseCommitId: selectedCommit.id,
+      baseTree: selectedCommit.tree
+    };
+    await saveCheckout(root, state);
+    await setHead(root, selectedBranch.name);
+    await pruneRepositoryCache(root);
+    print(
+      jsonOutput()
+        ? { ok: true, directory: root, project: pack.project, branch: selectedBranch.name, commit: selectedCommit.id, branches: pack.branches.length, objects: pack.objectCount }
+        : `Cloned ${pack.project.name}: ${pack.branches.length} branch(es), ${pack.objectCount} shared object(s). Checked out ${selectedBranch.name}.`,
+      jsonOutput()
+    );
   });
 
 program.command("status").action(async () => {
@@ -304,10 +357,33 @@ program.command("push").action(async () => {
     else pushedFiles.set(change.path, { path: change.path, content: change.content, mediaType: change.mediaType });
   }
   await writeBaseFiles(root, [...pushedFiles.values()]);
-  await saveCheckout(root, { ...state, baseCommitId: result.commit.id, baseTree: result.tree });
+  const nextState = { ...state, baseCommitId: result.commit.id, baseTree: result.tree };
+  await saveCheckout(root, nextState);
   await rm(pendingCommitPath(root), { force: true });
+  const pack = await fetchAndStorePack(root, nextState, credential);
+  const remote = pack.branches.find((branch) => branch.name === state.branch);
+  if (!remote || remote.headCommitId !== result.commit.id) {
+    throw new Error("Push succeeded, but the refreshed branch ref did not match the new commit.");
+  }
+  await trackRemoteBranch(root, state.branch);
+  await setHead(root, state.branch);
+  await pruneRepositoryCache(root);
   const remaining = changesBetween([...pushedFiles.values()], working);
   print(jsonOutput() ? { ...result, remainingChanges: remaining } : `Pushed ${pending.changes.length} path(s) to ${state.branch} at ${result.commit.id.slice(0, 8)}.${remaining.length ? ` ${remaining.length} newer local change(s) remain.` : ""}`, jsonOutput());
+});
+
+program.command("fetch").description("Fetch all remote branch heads and missing objects").action(async () => {
+  const root = await findCheckoutRoot();
+  const state = await readCheckout(root);
+  const credential = await readCredential(state.server);
+  const pack = await fetchAndStorePack(root, state, credential);
+  const cachedObjects = await listStoredObjectHashes(root);
+  print(
+    jsonOutput()
+      ? { ok: true, branches: pack.branches, transferredObjectCount: pack.transferredObjectCount, objectCount: pack.objectCount }
+      : `Fetched ${pack.branches.length} branch(es); received ${pack.transferredObjectCount} of ${pack.objectCount} object(s). Local cache has ${cachedObjects.length} object(s).`,
+    jsonOutput()
+  );
 });
 
 program
@@ -320,34 +396,35 @@ program
       throw new Error("Working tree or pending commit is not clean. Commit, push, or use --force.");
     }
     const credential = await readCredential(current.state.server);
-    const snapshot = await fetchSnapshot(credential, current.state.projectId, current.state.branch);
-    const state = await checkoutSnapshot(root, credential, snapshot);
+    await fetchAndStorePack(root, current.state, credential);
+    const remote = await readRef(root, "remote", current.state.branch);
+    if (!remote) throw new Error(`Remote branch 'origin/${current.state.branch}' no longer exists.`);
+    await trackRemoteBranch(root, current.state.branch);
+    const state = await checkoutCachedBranch(root, current.state, current.state.branch);
     print(jsonOutput() ? { ok: true, commit: state.baseCommitId, branch: state.branch } : `Pulled ${state.branch} at ${state.baseCommitId.slice(0, 8)}.`, jsonOutput());
   });
 
-async function listBranches() {
+async function listBranches(options: { all?: boolean; remotes?: boolean } = {}) {
   const root = await findCheckoutRoot();
   const state = await readCheckout(root);
-  const credential = await readCredential(state.server);
-  const response = await apiRequest<{
-    ok: true;
-    branches: Array<{
-      branch: { name: string };
-      commit: { id: string };
-      ahead: number;
-      behind: number;
-      mergedIntoMain: boolean;
-    }>;
-  }>(state.server, `/api/cli/projects/${encodeURIComponent(state.projectId)}/branches`, {}, credential.token);
+  await ensureRepositoryCache(root, state);
+  const [local, remote] = await Promise.all([listRefs(root, "local"), listRefs(root, "remote")]);
+  const rows = options.remotes
+    ? remote.map((ref) => ({ scope: "remote" as const, ref }))
+    : options.all
+      ? [
+          ...local.map((ref) => ({ scope: "local" as const, ref })),
+          ...remote.map((ref) => ({ scope: "remote" as const, ref }))
+        ]
+      : local.map((ref) => ({ scope: "local" as const, ref }));
   print(
     jsonOutput()
-      ? response
-      : response.branches.map(({ branch: item, commit, ahead, behind, mergedIntoMain }) => {
-          const relation = item.name === "main"
-            ? ""
-            : `  +${ahead}/-${behind}${mergedIntoMain ? "  merged" : ""}`;
-          return `${item.name === state.branch ? "*" : " "} ${item.name.padEnd(28)} ${commit.id.slice(0, 8)}${relation}`;
-        }).join("\n"),
+      ? { ok: true, current: state.branch, local, remote }
+      : rows.map(({ scope, ref }) => {
+          const name = scope === "remote" ? `remotes/origin/${ref.name}` : ref.name;
+          const tracking = scope === "local" && ref.upstream ? `  [${ref.upstream}]` : "";
+          return `${scope === "local" && ref.name === state.branch ? "*" : " "} ${name.padEnd(42)} ${ref.commitId.slice(0, 8)}${tracking}`;
+        }).join("\n") || "No branches.",
     jsonOutput()
   );
 }
@@ -356,16 +433,22 @@ async function createBranch(name: string, from?: string) {
   const root = await findCheckoutRoot();
   const state = await readCheckout(root);
   const credential = await readCredential(state.server);
-  const result = await apiRequest<{ ok: true; branch: { name: string } }>(state.server, `/api/cli/projects/${encodeURIComponent(state.projectId)}/branches`, { method: "POST", body: JSON.stringify({ name, fromBranch: from ?? state.branch }) }, credential.token);
+  const branchName = normalizeBranchRef(name);
+  const fromBranch = normalizeBranchRef(from ?? state.branch);
+  const result = await apiRequest<{ ok: true; branch: { name: string } }>(state.server, `/api/cli/projects/${encodeURIComponent(state.projectId)}/branches`, { method: "POST", body: JSON.stringify({ name: branchName, fromBranch }) }, credential.token);
+  await fetchAndStorePack(root, state, credential);
+  await trackRemoteBranch(root, result.branch.name);
+  await pruneRepositoryCache(root);
   print(jsonOutput() ? result : `Created branch ${result.branch.name}.`, jsonOutput());
 }
 
 async function deleteBranch(name: string, force: boolean) {
   const root = await findCheckoutRoot();
   const state = await readCheckout(root);
-  if (state.branch === name) throw new Error("Switch to another branch before deleting the current branch.");
+  const branchName = normalizeBranchRef(name);
+  if (state.branch === branchName) throw new Error("Switch to another branch before deleting the current branch.");
   const credential = await readCredential(state.server);
-  const query = new URLSearchParams({ name, force: String(force) });
+  const query = new URLSearchParams({ name: branchName, force: String(force) });
   const result = await apiRequest<{
     ok: true;
     branch: { name: string };
@@ -376,6 +459,9 @@ async function deleteBranch(name: string, force: boolean) {
     { method: "DELETE" },
     credential.token
   );
+  await removeRef(root, "local", branchName);
+  await fetchAndStorePack(root, state, credential);
+  await pruneRepositoryCache(root);
   print(
     jsonOutput()
       ? result
@@ -387,31 +473,83 @@ async function deleteBranch(name: string, force: boolean) {
 async function restoreBranch(name: string) {
   const root = await findCheckoutRoot();
   const state = await readCheckout(root);
+  const branchName = normalizeBranchRef(name);
   const credential = await readCredential(state.server);
   const result = await apiRequest<{ ok: true; branch: { name: string } }>(
     state.server,
     `/api/cli/projects/${encodeURIComponent(state.projectId)}/branches`,
-    { method: "PATCH", body: JSON.stringify({ name, action: "restore" }) },
+    { method: "PATCH", body: JSON.stringify({ name: branchName, action: "restore" }) },
     credential.token
   );
+  await fetchAndStorePack(root, state, credential);
   print(jsonOutput() ? result : `Recovered branch ${result.branch.name}.`, jsonOutput());
+}
+
+async function switchBranch(
+  name: string,
+  options: { create?: boolean; force?: boolean; from?: string | undefined }
+) {
+  const branchName = normalizeBranchRef(name);
+  const root = await findCheckoutRoot();
+  const current = await localChanges(root);
+  if ((current.changes.length > 0 || (await readPendingCommit(root))) && !options.force) {
+    throw new Error("Working tree is not clean. Commit, push, or use --force to discard local changes.");
+  }
+  await ensureRepositoryCache(root, current.state);
+  const credential = await readCredential(current.state.server);
+  if (options.create) {
+    await apiRequest(
+      current.state.server,
+      `/api/cli/projects/${encodeURIComponent(current.state.projectId)}/branches`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          name: branchName,
+          fromBranch: normalizeBranchRef(options.from ?? current.state.branch)
+        })
+      },
+      credential.token
+    );
+    await fetchAndStorePack(root, current.state, credential);
+  }
+
+  let cached = await cachedBranchCommit(root, branchName);
+  if (!cached) {
+    await fetchAndStorePack(root, current.state, credential);
+    cached = await cachedBranchCommit(root, branchName);
+  }
+  if (!cached) throw new Error(`Branch '${branchName}' was not found locally or on origin.`);
+  const state = await checkoutCachedBranch(root, current.state, branchName);
+  print(
+    jsonOutput()
+      ? { ok: true, branch: state.branch, commit: state.baseCommitId, created: Boolean(options.create) }
+      : `${options.create ? "Created and switched" : "Switched"} to ${state.branch}.`,
+    jsonOutput()
+  );
 }
 
 const branch = program
   .command("branch")
   .description("List, create, delete, or recover branches")
+  .argument("[name]", "create a branch without switching")
+  .option("-a, --all", "show local and remote refs")
+  .option("-r, --remotes", "show remote refs only")
   .option("-d, --delete <branch>", "delete a merged branch")
   .option("-D, --force-delete <branch>", "delete an unmerged branch")
   .option("--restore <branch>", "recover a recently deleted branch")
-  .action(async (options: { delete?: string; forceDelete?: string; restore?: string }) => {
+  .action(async (name: string | undefined, options: { all?: boolean; remotes?: boolean; delete?: string; forceDelete?: string; restore?: string }) => {
     const operations = [options.delete, options.forceDelete, options.restore].filter(Boolean);
-    if (operations.length > 1) throw new Error("Choose only one branch operation.");
+    if (operations.length + (name ? 1 : 0) > 1) throw new Error("Choose only one branch operation.");
     if (options.delete) await deleteBranch(options.delete, false);
     else if (options.forceDelete) await deleteBranch(options.forceDelete, true);
     else if (options.restore) await restoreBranch(options.restore);
-    else await listBranches();
+    else if (name) await createBranch(name);
+    else await listBranches(options);
   });
-branch.command("list").description("List branches").action(listBranches);
+branch.command("list").description("List branches")
+  .option("-a, --all", "show local and remote refs")
+  .option("-r, --remotes", "show remote refs only")
+  .action(listBranches);
 branch
   .command("create")
   .description("Create a branch without switching")
@@ -419,27 +557,36 @@ branch
   .option("--from <branch>")
   .action(async (name: string, options: { from?: string }) => createBranch(name, options.from));
 
-program.command("switch").alias("checkout").description("Switch branches")
-  .argument("<branch>")
-  .option("-c, --create", "create the branch before switching")
+program.command("switch").description("Switch branches")
+  .argument("[start-point]", "branch to switch to, or source branch with -c")
+  .option("-c, --create <branch>", "create a branch and switch to it")
   .option("-f, --force", "discard local changes")
-  .action(async (name: string, options: { create?: boolean; force?: boolean }) => {
-  const root = await findCheckoutRoot();
-  const current = await localChanges(root);
-  if ((current.changes.length > 0 || (await readPendingCommit(root))) && !options.force) throw new Error("Working tree is not clean. Use --force to discard local changes.");
-  const credential = await readCredential(current.state.server);
-  if (options.create) {
-    await apiRequest(
-      current.state.server,
-      `/api/cli/projects/${encodeURIComponent(current.state.projectId)}/branches`,
-      { method: "POST", body: JSON.stringify({ name, fromBranch: current.state.branch }) },
-      credential.token
-    );
-  }
-  const snapshot = await fetchSnapshot(credential, current.state.projectId, name);
-  const state = await checkoutSnapshot(root, credential, snapshot);
-  print(jsonOutput() ? { ok: true, branch: state.branch, commit: state.baseCommitId } : `Switched to ${state.branch}.`, jsonOutput());
-});
+  .action(async (startPoint: string | undefined, options: { create?: string; force?: boolean }) => {
+    const target = options.create ?? startPoint;
+    if (!target) throw new Error("Choose a branch, or use 'sv switch -c <branch>'.");
+    await switchBranch(target, {
+      create: Boolean(options.create),
+      ...(options.force !== undefined ? { force: options.force } : {}),
+      ...(options.create && startPoint !== undefined ? { from: startPoint } : {})
+    });
+  });
+
+program.command("checkout").description("Switch branches using familiar Git-style syntax")
+  .argument("[start-point]", "branch to switch to, or source branch with -b")
+  .option("-b, --create <branch>", "create a branch and switch to it")
+  .option("-f, --force", "discard local changes")
+  .action(async (startPoint: string | undefined, options: { create?: string; force?: boolean }) => {
+    if (options.create) {
+      await switchBranch(options.create, {
+        create: true,
+        ...(options.force !== undefined ? { force: options.force } : {}),
+        ...(startPoint !== undefined ? { from: startPoint } : {})
+      });
+      return;
+    }
+    if (!startPoint) throw new Error("Choose a branch, or use 'sv checkout -b <branch>'.");
+    await switchBranch(startPoint, options.force !== undefined ? { force: options.force } : {});
+  });
 
 program
   .command("log")

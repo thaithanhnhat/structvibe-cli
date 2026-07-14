@@ -56,7 +56,7 @@ The credential is written to `~/.structvibe/credentials.json` with mode `0600`. 
 ```bash
 sv clone my-project
 cd my-project
-sv switch -c feature/login
+sv checkout -b feature/login
 
 # Edit overview.md, screen HTML/CSS, tokens, or feature Markdown.
 sv preview
@@ -74,9 +74,29 @@ sv task add "Implement login API" --screen SCR-001 --feature F-003
 sv task
 ```
 
+Clone downloads every active branch head in one deduplicated pack and materializes
+only the selected working tree. Use `sv branch`, `sv branch -a`, and
+`sv branch -r` to inspect refs; `sv checkout <name>` switches from local objects,
+while `sv checkout -b <name>` creates and switches in one command. `sv fetch`
+updates `origin/*` and transfers only missing objects.
+
+The commands deliberately follow familiar branch syntax:
+
+```bash
+sv branch                         # local branches
+sv branch -a                      # local and origin branches
+sv branch -r                      # origin branches only
+sv branch feature/login           # create without switching
+sv checkout feature/login         # switch to an existing branch
+sv checkout -b feature/results    # create from the current branch and switch
+sv checkout -b hotfix origin/main # create from another branch and switch
+sv switch -c feature/profile      # modern checkout -b equivalent
+sv fetch                          # refresh every origin ref
+```
+
 Branches are lightweight references to immutable commits. `sv branch -d <name>`
 soft-deletes a merged branch for 30 days; `sv branch --restore <name>` recovers it.
-Server maintenance removes only objects no longer reachable from an active branch
+Server and local maintenance remove only objects no longer reachable from a ref
 or merge request, so branches do not duplicate the project tree.
 
 `sv restore` operates only on paths tracked in the StructVibe checkout. It never
@@ -101,6 +121,16 @@ The hidden `.structvibe` directory stores checkout metadata and compressed
 content-addressed base objects for offline status, diff, and restore. It does not
 contain a second mirrored project tree. Identical base content is stored once and
 old `.structvibe/base` checkouts migrate automatically.
+
+```text
+.structvibe/
+├── HEAD
+├── refs/
+│   ├── heads/             local branch pointers
+│   └── remotes/origin/    cached server branch pointers
+├── commits/               immutable head commit metadata
+└── objects/               shared Brotli-compressed file bodies
+```
 
 ## Versioned Source
 
