@@ -1,0 +1,60 @@
+{
+  "name": "@structvibe/cli",
+  "version": "0.1.0",
+  "description": "Open, auditable CLI for StructVibe product-context repositories",
+  "license": "Unlicense",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thaithanhnhat/structvibe-cli.git"
+  },
+  "homepage": "https://github.com/thaithanhnhat/structvibe-cli#readme",
+  "bugs": {
+    "url": "https://github.com/thaithanhnhat/structvibe-cli/issues"
+  },
+  "type": "module",
+  "bin": {
+    "sv": "./dist/bin.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx src/bin.ts",
+    "test": "tsx --test src/*.test.ts src/repository/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "check": "npm run test && npm run typecheck && npm run lint && npm run build",
+    "prepare": "npm run build"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "commander": "^15.0.0",
+    "css-tree": "^3.2.1",
+    "diff": "^9.0.0",
+    "parse5": "^8.0.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.2",
+    "@types/css-tree": "^2.3.11",
+    "@types/node": "^22.19.0",
+    "eslint": "^9.39.2",
+    "tsup": "^8.5.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.62.1"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "overrides": {
+    "esbuild": "0.28.1"
+  }
+}
