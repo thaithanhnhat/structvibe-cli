@@ -1,8 +1,7 @@
 import { spawn } from "node:child_process";
-import { access, mkdir, readdir, rm } from "node:fs/promises";
+import { mkdir, readdir, rm } from "node:fs/promises";
 import { hostname } from "node:os";
-import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { resolve } from "node:path";
 import { Command } from "commander";
 import { createTwoFilesPatch } from "diff";
 import { assertValidRepositoryFiles } from "./repository/index";
@@ -37,10 +36,11 @@ import {
   writeWorkingFiles
 } from "./files";
 import { print, printError } from "./output";
+import { startPreviewServer } from "./preview";
 import type { CheckoutState, CliCredential, PendingCommit, SnapshotResponse } from "./types";
 
 const program = new Command();
-program.name("sv").description("StructVibe repository CLI").version("0.1.0").option("--json", "machine-readable output");
+program.name("sv").description("StructVibe repository CLI").version("0.2.0").option("--json", "machine-readable output");
 const jsonOutput = () => Boolean(program.opts().json);
 
 async function ensureEmptyDirectory(path: string) {
@@ -515,13 +515,44 @@ program
     );
   });
 
-program.command("preview").argument("<screen>").action(async (screen: string) => {
-  const root = await findCheckoutRoot();
-  const state = await readCheckout(root);
-  const path = join(root, "design", "screens", screen, "screen.html");
-  await access(path);
-  print(jsonOutput() ? { ok: true, screen, path, url: pathToFileURL(path).toString(), branch: state.branch } : pathToFileURL(path).toString(), jsonOutput());
-});
+program
+  .command("preview")
+  .description("Preview local web source with live reload")
+  .argument("[screen]", "screen code to open")
+  .option("-p, --port <port>", "local preview port", "4173")
+  .option("--host <host>", "listen address", "127.0.0.1")
+  .option("--no-open", "do not open the browser automatically")
+  .action(async (screen: string | undefined, options: { port: string; host: string; open: boolean }) => {
+    const root = await findCheckoutRoot();
+    const state = await readCheckout(root);
+    const port = Number.parseInt(options.port, 10);
+    if (!Number.isInteger(port) || port < 0 || port > 65_535) throw new Error("--port must be between 0 and 65535.");
+    const preview = await startPreviewServer({
+      root,
+      projectName: state.projectName,
+      branch: state.branch,
+      screen,
+      host: options.host,
+      port
+    });
+    print(
+      jsonOutput()
+        ? { ok: true, url: preview.url, host: preview.host, port: preview.port, branch: state.branch, screen: screen ?? null }
+        : [`StructVibe preview: ${preview.url}`, "Watching local HTML, CSS, SVG, and screen links. Press Ctrl+C to stop."].join("\n"),
+      jsonOutput()
+    );
+    if (options.open) openBrowser(preview.url);
+    await new Promise<void>((resolvePromise, reject) => {
+      let stopping = false;
+      const stop = () => {
+        if (stopping) return;
+        stopping = true;
+        preview.close().then(resolvePromise, reject);
+      };
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+    });
+  });
 
 async function listTasks() {
   const root = await findCheckoutRoot();

@@ -27,16 +27,26 @@ function repository(screenHtml: string): RepositoryFile[] {
         viewport: { width: 390, height: 844 }
       })
     },
-    { path: "design/screens/SCR-001-login/screen.html", content: screenHtml }
+    { path: "design/screens/SCR-001-login/screen.html", content: screenHtml },
+    { path: "design/screens/SCR-001-login/screen.css", content: ".cta { color: var(--color-primary); }" }
   ];
 }
 
 test("accepts deterministic HTML, CSS, inline SVG, and internal screen links", () => {
   const result = validateRepositoryFiles(repository(`<!doctype html>
-    <html><head><style>.cta { color: var(--color-primary); }</style></head>
+    <html><head><link rel="stylesheet" href="../../tokens.css"><link rel="stylesheet" href="./screen.css"></head>
     <body><main data-sv-id="root"><a class="cta" href="#SCR-002">Continue</a>
     <svg viewBox="0 0 24 24"><path d="M2 12h20" /></svg></main></body></html>`));
   assert.equal(result.ok, true, JSON.stringify(result.issues));
+});
+
+test("blocks external or cross-screen stylesheets", () => {
+  const result = validateRepositoryFiles(repository(`<!doctype html><html><head>
+    <link rel="stylesheet" href="https://attacker.example/theme.css">
+    </head><body><main>Login</main></body></html>`));
+  assert.equal(result.ok, false);
+  assert.ok(result.issues.some((item) => item.code === "HTML_STYLESHEET_REFERENCE"));
+  assert.ok(result.issues.some((item) => item.code === "HTML_EXTERNAL_REFERENCE"));
 });
 
 test("blocks scripts, event handlers, external URLs, and CSS imports", () => {
@@ -59,4 +69,14 @@ test("rejects foreignObject and external SVG references", () => {
   assert.equal(result.ok, false);
   assert.ok(result.issues.some((item) => item.code === "HTML_TAG_BLOCKED"));
   assert.ok(result.issues.some((item) => item.code === "HTML_EXTERNAL_REFERENCE"));
+});
+
+test("rejects invalid and duplicate stable element IDs", () => {
+  const result = validateRepositoryFiles(repository(`<html><body>
+    <main data-sv-id="same"><p data-sv-id="same">Duplicate</p></main>
+    <p data-sv-id="not valid">Invalid</p>
+  </body></html>`));
+  assert.equal(result.ok, false);
+  assert.ok(result.issues.some((item) => item.code === "HTML_DUPLICATE_STABLE_ID"));
+  assert.ok(result.issues.some((item) => item.code === "HTML_INVALID_STABLE_ID"));
 });

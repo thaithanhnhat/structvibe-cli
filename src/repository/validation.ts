@@ -18,7 +18,7 @@ const MAX_CSS_NODES = 40_000;
 const allowedHtmlTags = new Set([
   "a", "article", "aside", "body", "button", "dd", "div", "dl", "dt", "fieldset", "footer",
   "form", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hr", "html", "img", "input", "label",
-  "legend", "li", "main", "meta", "nav", "ol", "option", "p", "section", "select", "small", "span",
+  "legend", "li", "link", "main", "meta", "nav", "ol", "option", "p", "section", "select", "small", "span",
   "strong", "style", "textarea", "title", "ul"
 ]);
 
@@ -33,7 +33,7 @@ const globalAttributes = new Set([
 
 const htmlAttributes = new Set([
   "charset", "name", "content", "type", "placeholder", "value", "autocomplete", "checked", "disabled",
-  "readonly", "required", "multiple", "selected", "for", "rows", "cols", "min", "max", "step"
+  "readonly", "required", "multiple", "selected", "for", "rows", "cols", "min", "max", "step", "rel", "media"
 ]);
 
 const svgAttributes = new Set([
@@ -85,7 +85,7 @@ export function repositoryMediaType(path: string): string {
 export function isRepositoryPathAllowed(path: string): boolean {
   if (path === "structvibe.json" || path === "overview.md" || path === "design/tokens.css") return true;
   if (/^decisions\/DEC-[A-Za-z0-9_-]+\.md$/u.test(path)) return true;
-  return /^design\/screens\/SCR-[A-Za-z0-9_-]+\/(screen\.(?:html|json)|features\/F-[A-Za-z0-9_-]+\.md)$/u.test(path);
+  return /^design\/screens\/SCR-[A-Za-z0-9_-]+\/(screen\.(?:html|json|css)|features\/F-[A-Za-z0-9_-]+\.md)$/u.test(path);
 }
 
 function safeRepositoryPath(path: string): boolean {
@@ -98,6 +98,10 @@ function safeReference(value: string): boolean {
 
 function safeAssetReference(value: string): boolean {
   return /^asset:\/\/[a-f0-9]{32,128}$/u.test(value);
+}
+
+function safeStylesheetReference(value: string): boolean {
+  return value === "./screen.css" || value === "../../tokens.css";
 }
 
 function validateCss(css: string, path: string, issues: RepositoryValidationIssue[], context: "stylesheet" | "declarationList" = "stylesheet") {
@@ -154,6 +158,7 @@ function validateHtml(content: string, path: string, issues: RepositoryValidatio
   }
 
   let nodes = 0;
+  const stableIds = new Set<string>();
   const visit = (node: HtmlNode, depth: number, inSvg: boolean) => {
     nodes += 1;
     if (nodes > MAX_HTML_NODES) {
@@ -173,6 +178,21 @@ function validateHtml(content: string, path: string, issues: RepositoryValidatio
 
     if ((node.attrs?.length ?? 0) > 64) {
       issue(issues, "HTML_TOO_MANY_ATTRIBUTES", "An element may not contain more than 64 attributes.", path, node);
+    }
+
+    const attributes = new Map((node.attrs ?? []).map((attribute) => [attribute.name.toLowerCase(), attribute.value.trim()]));
+    const stableId = attributes.get("data-sv-id");
+    if (stableId !== undefined) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9:._-]{0,159}$/u.test(stableId)) {
+        issue(issues, "HTML_INVALID_STABLE_ID", "data-sv-id must be a stable identifier of at most 160 characters.", path, node);
+      } else if (stableIds.has(stableId)) {
+        issue(issues, "HTML_DUPLICATE_STABLE_ID", `data-sv-id '${stableId}' appears more than once.`, path, node);
+      } else {
+        stableIds.add(stableId);
+      }
+    }
+    if (tag === "link" && (attributes.get("rel") !== "stylesheet" || !safeStylesheetReference(attributes.get("href") ?? ""))) {
+      issue(issues, "HTML_STYLESHEET_REFERENCE", "Stylesheets must target './screen.css' or '../../tokens.css'.", path, node);
     }
 
     for (const attribute of node.attrs ?? []) {
@@ -199,7 +219,8 @@ function validateHtml(content: string, path: string, issues: RepositoryValidatio
         issue(issues, "HTML_ATTRIBUTE_BLOCKED", `Attribute '${name}' is not supported.`, path, node);
         continue;
       }
-      if ((name === "href" || name === "xlink:href") && !safeReference(value)) {
+      const stylesheetReference = tag === "link" && name === "href";
+      if ((name === "href" || name === "xlink:href") && !(stylesheetReference ? safeStylesheetReference(value) : safeReference(value))) {
         issue(issues, "HTML_EXTERNAL_REFERENCE", `Reference '${value}' must target a local screen or SVG fragment.`, path, node);
       }
       if (name === "src" && !safeAssetReference(value)) {

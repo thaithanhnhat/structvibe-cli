@@ -56,6 +56,10 @@ export function checkoutBasePath(root: string) {
   return join(root, checkoutDirectoryName, "base");
 }
 
+export function checkoutObjectsPath(root: string) {
+  return join(root, checkoutDirectoryName, "objects");
+}
+
 export function pendingCommitPath(root: string) {
   return join(root, checkoutDirectoryName, "pending.json");
 }

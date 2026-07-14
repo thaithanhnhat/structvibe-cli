@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const REPOSITORY_PROFILE_VERSION = 1 as const;
+export const REPOSITORY_PROFILE_VERSION = 2 as const;
 
 export const repositoryPermissionSchema = z.enum([
   "repository:read",

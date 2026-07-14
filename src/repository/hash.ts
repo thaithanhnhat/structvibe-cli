@@ -19,7 +19,9 @@ export function hashRepositoryTree(tree: RepositoryTree): string {
 
 function canonicalTreeEntries(entries: RepositoryTreeEntries): RepositoryTreeEntries {
   return Object.fromEntries(
-    Object.entries(entries).sort(([left], [right]) => left.localeCompare(right))
+    Object.entries(entries)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([name, entry]) => [name, { kind: entry.kind, hash: entry.hash }])
   );
 }
 

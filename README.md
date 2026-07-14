@@ -58,7 +58,8 @@ sv clone my-project
 cd my-project
 sv switch -c feature/login
 
-# Edit overview.md, design/tokens.css, screen HTML, or feature Markdown.
+# Edit overview.md, screen HTML/CSS, tokens, or feature Markdown.
+sv preview
 sv check
 sv diff
 sv commit -m "Design commercial login flow"
@@ -82,6 +83,25 @@ or merge request, so branches do not duplicate the project tree.
 invokes `git restore`, changes `.git`, or restores application source outside that
 checkout.
 
+## Local Preview
+
+Preview the current working tree before committing or pushing anything:
+
+```bash
+sv preview
+sv preview SCR-001-login
+```
+
+The preview server listens on `127.0.0.1`, opens the browser, reloads when a
+screen file changes, and follows internal `#SCR-*` links. Screen source runs in a
+sandboxed iframe with scripts, network access, forms, popups, and external
+navigation disabled. Use `--no-open`, `--port`, or `--host` when needed.
+
+The hidden `.structvibe` directory stores checkout metadata and compressed
+content-addressed base objects for offline status, diff, and restore. It does not
+contain a second mirrored project tree. Identical base content is stored once and
+old `.structvibe/base` checkouts migrate automatically.
+
 ## Versioned Source
 
 ```text
@@ -90,11 +110,16 @@ overview.md
 design/tokens.css
 design/screens/SCR-*/screen.json
 design/screens/SCR-*/screen.html
+design/screens/SCR-*/screen.css
 design/screens/SCR-*/features/F-*.md
 decisions/DEC-*.md
 ```
 
-Screen source supports a deterministic profile of HTML, CSS, and inline SVG. Scripts, event handlers, external network URLs, CSS imports, animation, and raw HTML in Markdown are rejected locally and again by the server.
+`design/tokens.css` contains shared design tokens only. Each screen owns its
+`screen.css`, so tools can read and change one screen without loading a
+project-wide stylesheet. Screen source supports a deterministic profile of HTML,
+CSS, and inline SVG. Scripts, event handlers, external network URLs, CSS imports,
+animation, and raw HTML in Markdown are rejected locally and again by the server.
 
 ## License
 
