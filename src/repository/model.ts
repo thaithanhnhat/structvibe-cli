@@ -102,6 +102,7 @@ export interface RepositoryValidationIssue {
 export interface RepositoryValidationResult {
   ok: boolean;
   issues: RepositoryValidationIssue[];
+  warnings: RepositoryValidationIssue[];
   fileCount: number;
   byteSize: number;
 }

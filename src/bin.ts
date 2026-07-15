@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { Command } from "commander";
 import { createTwoFilesPatch } from "diff";
 import { assertValidRepositoryFiles } from "./repository/index";
+import { resolveCheckoutAsset } from "./assets";
 import {
   apiRequest,
   CliApiError,
@@ -283,7 +284,17 @@ program.command("status").action(async () => {
 program.command("check").alias("validate").description("Validate StructVibe repository files").action(async () => {
   const root = await findCheckoutRoot();
   const result = assertValidRepositoryFiles(await readWorkingFiles(root));
-  print(jsonOutput() ? result : `Repository is valid: ${result.fileCount} files, ${result.byteSize} bytes.`, jsonOutput());
+  print(
+    jsonOutput()
+      ? result
+      : [
+          `Repository is valid: ${result.fileCount} files, ${result.byteSize} bytes.`,
+          ...result.warnings.map((warning) =>
+            `warning  ${warning.code}${warning.path ? `  ${warning.path}` : ""}\n         ${warning.message}`
+          )
+        ].join("\n"),
+    jsonOutput()
+  );
 });
 
 program.command("diff").action(async () => {
@@ -674,13 +685,23 @@ program
     const state = await readCheckout(root);
     const port = Number.parseInt(options.port, 10);
     if (!Number.isInteger(port) || port < 0 || port > 65_535) throw new Error("--port must be between 0 and 65535.");
+    let assetCredential: Promise<CliCredential> | null = null;
     const preview = await startPreviewServer({
       root,
       projectName: state.projectName,
       branch: state.branch,
       screen,
       host: options.host,
-      port
+      port,
+      resolveAsset: async (contentHash) => {
+        assetCredential ??= readCredential(state.server);
+        return resolveCheckoutAsset(
+          root,
+          state,
+          await assetCredential,
+          contentHash
+        );
+      }
     });
     print(
       jsonOutput()

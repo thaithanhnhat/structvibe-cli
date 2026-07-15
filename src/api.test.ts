@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fetchCliIdentity, fetchRepositoryPack, fetchSnapshot, startDeviceAuthorization } from "./api";
+import {
+  fetchCliIdentity,
+  fetchProjectAsset,
+  fetchRepositoryPack,
+  fetchSnapshot,
+  startDeviceAuthorization
+} from "./api";
 import { REPOSITORY_PROFILE_VERSION } from "./repository/index";
 import type { CliCredential, SnapshotResponse } from "./types";
 
@@ -119,6 +125,35 @@ test("validates a supplied access token with whoami", async () => {
   try {
     const result = await fetchCliIdentity("https://structvibe.test", "supplied-token");
     assert.equal(result.token.id, "token-id");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("downloads project assets through the authenticated CLI endpoint", async () => {
+  const originalFetch = globalThis.fetch;
+  const hash = "a".repeat(64);
+  globalThis.fetch = async (input, init) => {
+    assert.equal(
+      String(input),
+      `https://structvibe.test/api/cli/projects/project-id/assets/${hash}`
+    );
+    assert.equal(
+      new Headers(init?.headers).get("authorization"),
+      "Bearer secret-test-token"
+    );
+    return new Response("asset", {
+      headers: {
+        "content-length": "5",
+        "content-type": "image/png",
+        etag: `"${hash}"`
+      }
+    });
+  };
+  try {
+    const result = await fetchProjectAsset(credential, "project-id", hash);
+    assert.equal(result.contentType, "image/png");
+    assert.equal(new TextDecoder().decode(result.bytes), "asset");
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -62,4 +63,67 @@ test("preview never serves paths outside the repository profile", async (context
 
   const response = await fetch(`${preview.url.replace(/\?.*$/u, "")}repo/%2e%2e/secret.txt`);
   assert.equal(response.status, 404);
+});
+
+test("preview resolves immutable repository assets without exposing credentials", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "structvibe-preview-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeRepository(root);
+  const bytes = new TextEncoder().encode("safe image bytes");
+  const hash = createHash("sha256").update(bytes).digest("hex");
+  const screenRoot = join(root, "design", "screens", "SCR-001-login");
+  await writeFile(
+    join(screenRoot, "screen.html"),
+    `<html><head><link rel="stylesheet" href="./screen.css"></head><body><img src="asset://${hash}" alt="Hero"></body></html>`
+  );
+  await writeFile(
+    join(screenRoot, "screen.css"),
+    `.hero { background-image: url("asset://${hash}"); }`
+  );
+  let requests = 0;
+  const preview = await startPreviewServer({
+    root,
+    projectName: "LuyenDe",
+    branch: "main",
+    port: 0,
+    resolveAsset: async (contentHash) => {
+      requests += 1;
+      assert.equal(contentHash, hash);
+      return { bytes, contentType: "image/png" };
+    }
+  });
+  context.after(() => preview.close());
+  const origin = preview.url.replace(/\?.*$/u, "");
+
+  const html = await fetch(`${origin}repo/design/screens/SCR-001-login/screen.html`).then((response) => response.text());
+  const css = await fetch(`${origin}repo/design/screens/SCR-001-login/screen.css`).then((response) => response.text());
+  assert.match(html, new RegExp(`/__sv/assets/${hash}`, "u"));
+  assert.match(css, new RegExp(`/__sv/assets/${hash}`, "u"));
+  assert.doesNotMatch(`${html}${css}`, /asset:\/\//u);
+
+  const asset = await fetch(`${origin}__sv/assets/${hash}`);
+  assert.equal(asset.headers.get("content-type"), "image/png");
+  assert.deepEqual(new Uint8Array(await asset.arrayBuffer()), bytes);
+  assert.equal(requests, 1);
+});
+
+test("preview explains when a branch screen is actually empty", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "structvibe-preview-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeRepository(root);
+  await writeFile(
+    join(root, "design", "screens", "SCR-001-login", "screen.html"),
+    `<html><body><main data-sv-id="screen-root"></main></body></html>`
+  );
+  const preview = await startPreviewServer({
+    root,
+    projectName: "LuyenDe",
+    branch: "main",
+    port: 0
+  });
+  context.after(() => preview.close());
+
+  const shell = await fetch(preview.url).then((response) => response.text());
+  assert.match(shell, /source warning/u);
+  assert.match(shell, /branch source is blank/u);
 });

@@ -25,6 +25,12 @@ export interface PreviewServerOptions {
   screen?: string | undefined;
   host?: string | undefined;
   port?: number | undefined;
+  resolveAsset?: ((contentHash: string) => Promise<PreviewAsset | null>) | undefined;
+}
+
+export interface PreviewAsset {
+  bytes: Uint8Array;
+  contentType: string;
 }
 
 export interface RunningPreviewServer {
@@ -35,6 +41,8 @@ export interface RunningPreviewServer {
 }
 
 const screenDirectoryPattern = /^SCR-[A-Za-z0-9_-]+$/u;
+const assetHashPattern = /^[a-f0-9]{64}$/u;
+const assetReferencePattern = /asset:\/\/([a-f0-9]{64})/gu;
 
 function escapeHtml(value: string) {
   return value
@@ -74,15 +82,24 @@ export async function discoverPreviewScreens(root: string): Promise<PreviewScree
   return screens.sort((left, right) => left.code.localeCompare(right.code));
 }
 
-async function validationResult(root: string): Promise<RepositoryValidationResult | { ok: false; issues: Array<{ code: string; message: string }> }> {
+async function validationResult(root: string): Promise<RepositoryValidationResult> {
   try {
     return validateRepositoryFiles(await readWorkingFiles(root));
   } catch (error) {
     return {
       ok: false,
-      issues: [{ code: "WORKING_TREE_ERROR", message: error instanceof Error ? error.message : String(error) }]
+      issues: [{ code: "WORKING_TREE_ERROR", message: error instanceof Error ? error.message : String(error) }],
+      warnings: [],
+      fileCount: 0,
+      byteSize: 0
     };
   }
+}
+
+export function rewritePreviewAssetReferences(source: string) {
+  return source.replace(assetReferencePattern, (_match, contentHash: string) =>
+    `/__sv/assets/${contentHash}`
+  );
 }
 
 function setCommonHeaders(response: ServerResponse) {
@@ -111,8 +128,25 @@ function shellSource(input: {
   if (!selected) throw new Error("The repository has no screens to preview.");
   const screenData = scriptJson(input.screens);
   const validationCount = input.validation.issues.length;
+  const warningByScreen = Object.fromEntries(
+    input.screens.flatMap((screen) => {
+      const root = `design/screens/${screen.code}/`;
+      const warning = input.validation.warnings.find((item) => item.path?.startsWith(root));
+      return warning ? [[screen.code, warning.message]] : [];
+    })
+  );
+  const warningData = scriptJson(warningByScreen);
+  const warningCount = input.validation.warnings.length;
+  const statusState = input.validation.ok
+    ? warningCount > 0 ? "warning" : "valid"
+    : "error";
+  const statusLabel = input.validation.ok
+    ? warningCount > 0
+      ? `${warningCount} source warning${warningCount === 1 ? "" : "s"}`
+      : "Valid"
+    : `${validationCount} issue${validationCount === 1 ? "" : "s"}`;
   const screenLinks = input.screens.map((screen) => `
-        <button class="screen-item${screen.code === selected.code ? " active" : ""}" data-screen="${escapeHtml(screen.code)}" type="button">
+        <button class="screen-item${screen.code === selected.code ? " active" : ""}${warningByScreen[screen.code] ? " warning" : ""}" data-screen="${escapeHtml(screen.code)}" type="button">
           <span>${escapeHtml(screen.name)}</span><small>${escapeHtml(screen.code)}</small>
         </button>`).join("");
 
@@ -136,7 +170,9 @@ function shellSource(input: {
     .viewport { color: #53635b; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
     .tools { display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
     .status { display: inline-flex; align-items: center; gap: 7px; padding: 6px 9px; border: 1px solid #cbd7d0; border-radius: 999px; background: #fff; color: #426051; font-size: 12px; font-weight: 700; }
-    .status::before { width: 7px; height: 7px; border-radius: 50%; background: ${input.validation.ok ? "#4d946d" : "#c8755f"}; content: ""; }
+    .status::before { width: 7px; height: 7px; border-radius: 50%; background: #4d946d; content: ""; }
+    .status[data-state="warning"]::before { background: #c58d35; }
+    .status[data-state="error"]::before { background: #c8755f; }
     .zoom { display: flex; overflow: hidden; border: 1px solid #cbd7d0; border-radius: 6px; background: #fff; }
     .zoom button { min-width: 46px; height: 30px; border: 0; border-left: 1px solid #d7e0db; background: transparent; cursor: pointer; }
     .zoom button:first-child { border-left: 0; }
@@ -148,6 +184,8 @@ function shellSource(input: {
     .screen-item { width: 100%; padding: 9px 10px; border: 1px solid transparent; border-radius: 5px; background: transparent; text-align: left; cursor: pointer; }
     .screen-item:hover { background: #edf3ef; }
     .screen-item.active { border-color: #a9c4b5; background: #fff; box-shadow: 0 1px 2px rgb(16 36 27 / 7%); }
+    .screen-item.warning { position: relative; padding-right: 28px; }
+    .screen-item.warning::after { position: absolute; top: 13px; right: 10px; width: 7px; height: 7px; border-radius: 50%; background: #c58d35; content: ""; }
     .screen-item span, .screen-item small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .screen-item span { font-weight: 750; }
     .screen-item small { margin-top: 2px; color: #738078; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -156,6 +194,8 @@ function shellSource(input: {
     .scaled-frame { position: relative; flex: none; }
     iframe { position: absolute; inset: 0 auto auto 0; display: block; border: 1px solid #afbeb6; border-radius: 2px; background: #fff; box-shadow: 0 18px 48px rgb(25 45 36 / 14%); transform-origin: top left; }
     .error-note { position: absolute; right: 14px; bottom: 14px; max-width: min(480px, calc(100% - 28px)); padding: 10px 12px; border: 1px solid #deb2a7; border-radius: 6px; background: #fff8f6; color: #7d3e31; font-size: 12px; }
+    .error-note[data-tone="warning"] { border-color: #dec89e; background: #fffaf0; color: #674b1e; }
+    .error-note[hidden] { display: none; }
     @media (max-width: 760px) {
       .topbar { grid-template-columns: minmax(0, 1fr) auto; }
       .viewport { display: none; }
@@ -171,7 +211,7 @@ function shellSource(input: {
       <div class="identity"><span class="mark">SV</span><span><strong>${escapeHtml(input.projectName)}</strong><small>${escapeHtml(input.branch)} · local preview</small></span></div>
       <span class="viewport" id="viewport">${selected.viewport.width} × ${selected.viewport.height}</span>
       <div class="tools">
-        <span class="status">${input.validation.ok ? "Valid" : `${validationCount} issue${validationCount === 1 ? "" : "s"}`}</span>
+        <span class="status" data-state="${statusState}">${statusLabel}</span>
         <div class="zoom"><button class="active" data-zoom="fit" type="button">Fit</button><button data-zoom="1" type="button">100%</button></div>
       </div>
     </header>
@@ -179,20 +219,40 @@ function shellSource(input: {
       <aside class="sidebar"><div class="sidebar-head">Screens · ${input.screens.length}</div><div class="screen-list">${screenLinks}
       </div></aside>
       <main class="canvas" id="canvas"><div class="stage" id="stage"><div class="scaled-frame" id="scaled-frame"><iframe id="preview" sandbox="allow-same-origin" title="Screen preview"></iframe></div></div>
-        ${input.validation.ok ? "" : `<div class="error-note">Run <strong>sv check</strong> for validation details. Preview remains sandboxed while you edit.</div>`}
+        <div class="error-note" data-tone="${input.validation.ok ? "warning" : "error"}" id="source-note"${input.validation.ok && !warningByScreen[selected.code] ? " hidden" : ""}></div>
       </main>
     </div>
   </div>
   <script nonce="${input.nonce}">
     const screens = ${screenData};
+    const screenWarnings = ${warningData};
     const frame = document.getElementById("preview");
     const scaledFrame = document.getElementById("scaled-frame");
     const canvas = document.getElementById("canvas");
     const viewport = document.getElementById("viewport");
+    const sourceNote = document.getElementById("source-note");
     let current = ${scriptJson(selected.code)};
     let zoom = "fit";
 
     function selectedScreen() { return screens.find((screen) => screen.code === current) || screens[0]; }
+    function updateSourceNote() {
+      if (!sourceNote) return;
+      const warning = screenWarnings[current];
+      if (warning) {
+        sourceNote.hidden = false;
+        sourceNote.dataset.tone = "warning";
+        sourceNote.textContent = warning + " The preview is rendering this branch's HTML and CSS exactly.";
+        return;
+      }
+      if (${scriptJson(!input.validation.ok)}) {
+        sourceNote.hidden = false;
+        sourceNote.dataset.tone = "error";
+        sourceNote.innerHTML = "Run <strong>sv check</strong> for validation details. Preview remains sandboxed while you edit.";
+        return;
+      }
+      sourceNote.hidden = true;
+      sourceNote.textContent = "";
+    }
     function applyScale() {
       const screen = selectedScreen();
       if (!screen) return;
@@ -216,6 +276,7 @@ function shellSource(input: {
       history[replaceHistory ? "replaceState" : "pushState"]({}, "", url);
       frame.src = "/repo/design/screens/" + encodeURIComponent(current) + "/screen.html?v=" + Date.now();
       applyScale();
+      updateSourceNote();
     }
     frame.addEventListener("load", () => {
       try {
@@ -302,6 +363,25 @@ export async function startPreviewServer(options: PreviewServerOptions): Promise
         send(response, 200, "application/json; charset=utf-8", JSON.stringify(await validationResult(root)));
         return;
       }
+      if (requestUrl.pathname.startsWith("/__sv/assets/")) {
+        const contentHash = requestUrl.pathname.slice("/__sv/assets/".length);
+        if (!assetHashPattern.test(contentHash) || !options.resolveAsset) {
+          send(response, 404, "text/plain; charset=utf-8", "Asset not found");
+          return;
+        }
+        const asset = await options.resolveAsset(contentHash);
+        if (!asset) {
+          send(response, 404, "text/plain; charset=utf-8", "Asset not found");
+          return;
+        }
+        response.statusCode = 200;
+        setCommonHeaders(response);
+        response.setHeader("cache-control", "private, max-age=31536000, immutable");
+        response.setHeader("content-type", asset.contentType);
+        response.setHeader("content-length", String(asset.bytes.byteLength));
+        response.end(Buffer.from(asset.bytes));
+        return;
+      }
       if (requestUrl.pathname.startsWith("/repo/")) {
         const target = repositoryPath(root, requestUrl.pathname);
         if (!target) {
@@ -322,9 +402,13 @@ export async function startPreviewServer(options: PreviewServerOptions): Promise
             "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'none'; script-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
           );
         }
+        const mediaType = repositoryMediaType(target.path);
+        const body = target.path.endsWith(".html") || target.path.endsWith(".css")
+          ? Buffer.from(rewritePreviewAssetReferences(content.toString("utf8")), "utf8")
+          : content;
         response.statusCode = 200;
-        response.setHeader("content-type", `${repositoryMediaType(target.path)}; charset=utf-8`);
-        response.end(content);
+        response.setHeader("content-type", `${mediaType}; charset=utf-8`);
+        response.end(body);
         return;
       }
       if (requestUrl.pathname === "/favicon.ico") {

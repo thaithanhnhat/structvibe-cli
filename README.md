@@ -115,7 +115,14 @@ sv preview SCR-001-login
 The preview server listens on `127.0.0.1`, opens the browser, reloads when a
 screen file changes, and follows internal `#SCR-*` links. Screen source runs in a
 sandboxed iframe with scripts, network access, forms, popups, and external
-navigation disabled. Use `--no-open`, `--port`, or `--host` when needed.
+navigation disabled. Immutable `asset://` images, fonts, and SVG files are fetched
+through the authenticated project API only when needed, verified by content hash,
+and cached under `.structvibe/assets`. Use `--no-open`, `--port`, or `--host` when
+needed.
+
+`sv check` and the preview sidebar warn when a screen is empty or still contains
+only its generated name. These source-quality warnings do not block a commit; they
+explain why that branch renders an empty or placeholder screen.
 
 The hidden `.structvibe` directory stores checkout metadata and compressed
 content-addressed base objects for offline status, diff, and restore. It does not

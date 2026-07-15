@@ -80,3 +80,32 @@ test("rejects invalid and duplicate stable element IDs", () => {
   assert.ok(result.issues.some((item) => item.code === "HTML_DUPLICATE_STABLE_ID"));
   assert.ok(result.issues.some((item) => item.code === "HTML_INVALID_STABLE_ID"));
 });
+
+test("accepts only SHA-256 content-addressed assets", () => {
+  const hash = "a".repeat(64);
+  const valid = validateRepositoryFiles(repository(
+    `<html><body><main><img src="asset://${hash}" title="Preview"></main></body></html>`
+  ));
+  assert.equal(valid.ok, true, JSON.stringify(valid.issues));
+
+  const invalid = validateRepositoryFiles(repository(
+    `<html><body><main><img src="asset://${"a".repeat(32)}" title="Preview"></main></body></html>`
+  ));
+  assert.ok(invalid.issues.some((item) => item.code === "HTML_EXTERNAL_ASSET"));
+});
+
+test("warns without rejecting a screen whose branch source is empty", () => {
+  const result = validateRepositoryFiles(repository(
+    `<html><body><main data-sv-id="screen-root"></main></body></html>`
+  ));
+  assert.equal(result.ok, true, JSON.stringify(result.issues));
+  assert.ok(result.warnings.some((item) => item.code === "SCREEN_SOURCE_EMPTY"));
+});
+
+test("identifies generated screen scaffolds as placeholders", () => {
+  const result = validateRepositoryFiles(repository(
+    `<html><body><main><p>SCR-001-login</p><h1>Login</h1></main></body></html>`
+  ));
+  assert.equal(result.ok, true, JSON.stringify(result.issues));
+  assert.ok(result.warnings.some((item) => item.code === "SCREEN_SOURCE_PLACEHOLDER"));
+});

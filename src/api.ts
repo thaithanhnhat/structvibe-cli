@@ -133,3 +133,49 @@ export function fetchRepositoryPack(
     return pack;
   });
 }
+
+export async function fetchProjectAsset(
+  credential: CliCredential,
+  projectRef: string,
+  contentHash: string
+) {
+  const url = `${credential.server.replace(/\/$/u, "")}/api/cli/projects/${encodeURIComponent(projectRef)}/assets/${encodeURIComponent(contentHash)}`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: {
+        accept: "application/octet-stream",
+        authorization: `Bearer ${credential.token}`
+      },
+      signal: AbortSignal.timeout(30_000)
+    });
+  } catch (error) {
+    throw new CliApiError(
+      "SERVER_UNREACHABLE",
+      error instanceof Error ? error.message : "StructVibe server is unreachable.",
+      0
+    );
+  }
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
+    throw new CliApiError(
+      typeof payload.code === "string" ? payload.code : "ASSET_REQUEST_FAILED",
+      typeof payload.error === "string" ? payload.error : `Asset request failed with HTTP ${response.status}.`,
+      response.status,
+      payload
+    );
+  }
+  const declaredSize = Number(response.headers.get("content-length") ?? 0);
+  if (declaredSize > 25 * 1024 * 1024) {
+    throw new CliApiError("ASSET_TOO_LARGE", "StructVibe assets are limited to 25 MB.", 413);
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > 25 * 1024 * 1024) {
+    throw new CliApiError("ASSET_TOO_LARGE", "StructVibe assets are limited to 25 MB.", 413);
+  }
+  return {
+    bytes,
+    contentType: response.headers.get("content-type") ?? "application/octet-stream",
+    etag: response.headers.get("etag")
+  };
+}

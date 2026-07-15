@@ -58,6 +58,16 @@ type HtmlNode = {
   sourceCodeLocation?: { startLine?: number; startCol?: number } | undefined;
 };
 
+interface HtmlContentSummary {
+  bodyTags: string[];
+  text: string;
+  hasVisualContent: boolean;
+}
+
+const visualHtmlTags = new Set([
+  "button", "hr", "img", "input", "select", "svg", "textarea"
+]);
+
 function issue(
   issues: RepositoryValidationIssue[],
   code: string,
@@ -97,7 +107,7 @@ function safeReference(value: string): boolean {
 }
 
 function safeAssetReference(value: string): boolean {
-  return /^asset:\/\/[a-f0-9]{32,128}$/u.test(value);
+  return /^asset:\/\/[a-f0-9]{64}$/u.test(value);
 }
 
 function safeStylesheetReference(value: string): boolean {
@@ -148,18 +158,32 @@ function textContent(node: HtmlNode): string {
   return (node.childNodes ?? []).map(textContent).join("");
 }
 
-function validateHtml(content: string, path: string, issues: RepositoryValidationIssue[]) {
+function validateHtml(
+  content: string,
+  path: string,
+  issues: RepositoryValidationIssue[]
+): HtmlContentSummary {
   let root: HtmlNode;
   try {
     root = parse(content, { sourceCodeLocationInfo: true }) as unknown as HtmlNode;
   } catch {
     issue(issues, "HTML_PARSE_ERROR", "HTML could not be parsed.", path);
-    return;
+    return { bodyTags: [], text: "", hasVisualContent: false };
   }
 
   let nodes = 0;
   const stableIds = new Set<string>();
-  const visit = (node: HtmlNode, depth: number, inSvg: boolean) => {
+  const bodyTags: string[] = [];
+  const bodyText: string[] = [];
+  let hasVisualElement = false;
+  let hasStyledElement = false;
+  const visit = (
+    node: HtmlNode,
+    depth: number,
+    inSvg: boolean,
+    inBody: boolean,
+    ignoreText: boolean
+  ) => {
     nodes += 1;
     if (nodes > MAX_HTML_NODES) {
       issue(issues, "HTML_TOO_COMPLEX", `HTML exceeds ${MAX_HTML_NODES} nodes.`, path, node);
@@ -172,6 +196,14 @@ function validateHtml(content: string, path: string, issues: RepositoryValidatio
 
     const tag = node.tagName?.toLowerCase();
     const svg = inSvg || tag === "svg";
+    const body = inBody || tag === "body";
+    const ignoresText = ignoreText || tag === "style" || tag === "title";
+    if (body && tag && tag !== "body") bodyTags.push(tag);
+    if (body && tag && visualHtmlTags.has(tag)) hasVisualElement = true;
+    if (body && node.nodeName === "#text" && !ignoresText) {
+      const value = (node.value ?? "").replace(/\s+/gu, " ").trim();
+      if (value) bodyText.push(value);
+    }
     if (tag && !(svg ? allowedSvgTags.has(tag) : allowedHtmlTags.has(tag))) {
       issue(issues, "HTML_TAG_BLOCKED", `<${tag}> is not supported by the StructVibe profile.`, path, node);
     }
@@ -181,6 +213,14 @@ function validateHtml(content: string, path: string, issues: RepositoryValidatio
     }
 
     const attributes = new Map((node.attrs ?? []).map((attribute) => [attribute.name.toLowerCase(), attribute.value.trim()]));
+    if (
+      body &&
+      tag &&
+      tag !== "body" &&
+      (attributes.get("style")?.trim().length ?? 0) > 0
+    ) {
+      hasStyledElement = true;
+    }
     const stableId = attributes.get("data-sv-id");
     if (stableId !== undefined) {
       if (!/^[A-Za-z0-9][A-Za-z0-9:._-]{0,159}$/u.test(stableId)) {
@@ -232,10 +272,17 @@ function validateHtml(content: string, path: string, issues: RepositoryValidatio
     }
 
     if (tag === "style") validateCss(textContent(node), path, issues);
-    for (const child of node.childNodes ?? []) visit(child, depth + 1, svg);
+    for (const child of node.childNodes ?? []) {
+      visit(child, depth + 1, svg, body, ignoresText);
+    }
   };
 
-  visit(root, 0, false);
+  visit(root, 0, false, false, false);
+  return {
+    bodyTags,
+    text: bodyText.join(" "),
+    hasVisualContent: bodyText.length > 0 || hasVisualElement || hasStyledElement
+  };
 }
 
 function validateMarkdown(content: string, path: string, issues: RepositoryValidationIssue[]) {
@@ -246,9 +293,25 @@ function validateMarkdown(content: string, path: string, issues: RepositoryValid
 
 export function validateRepositoryFiles(rawFiles: readonly RepositoryFile[]): RepositoryValidationResult {
   const issues: RepositoryValidationIssue[] = [];
+  const warnings: RepositoryValidationIssue[] = [];
   const files = rawFiles.map((file) => repositoryFileSchema.parse(file));
   const byteSize = files.reduce((total, file) => total + Buffer.byteLength(file.content, "utf8"), 0);
   const paths = new Set<string>();
+  const screenManifests = new Map<
+    string,
+    { code: string; name: string }
+  >();
+  const htmlSummaries = new Map<string, HtmlContentSummary>();
+
+  for (const file of files) {
+    if (!file.path.endsWith("/screen.json")) continue;
+    try {
+      const manifest = screenManifestSchema.parse(JSON.parse(file.content));
+      screenManifests.set(file.path.replace(/\/screen\.json$/u, ""), manifest);
+    } catch {
+      // The regular validation pass reports malformed manifests.
+    }
+  }
 
   if (files.length > MAX_FILES) issue(issues, "TOO_MANY_FILES", `A repository may contain at most ${MAX_FILES} files.`);
   if (byteSize > MAX_TOTAL_BYTES) issue(issues, "REPOSITORY_TOO_LARGE", "Repository source may not exceed 20 MB.");
@@ -272,7 +335,9 @@ export function validateRepositoryFiles(rawFiles: readonly RepositoryFile[]): Re
       issue(issues, "INVALID_JSON_DOCUMENT", `JSON in '${file.path}' does not match its repository schema.`, file.path);
     }
 
-    if (file.path.endsWith(".html")) validateHtml(file.content, file.path, issues);
+    if (file.path.endsWith(".html")) {
+      htmlSummaries.set(file.path, validateHtml(file.content, file.path, issues));
+    }
     if (file.path.endsWith(".css")) validateCss(file.content, file.path, issues);
     if (file.path.endsWith(".md")) validateMarkdown(file.content, file.path, issues);
   }
@@ -289,7 +354,42 @@ export function validateRepositoryFiles(rawFiles: readonly RepositoryFile[]): Re
     }
   }
 
-  return { ok: issues.length === 0, issues, fileCount: files.length, byteSize };
+  for (const [path, summary] of htmlSummaries) {
+    const screenRoot = path.replace(/\/screen\.html$/u, "");
+    if (!summary.hasVisualContent) {
+      issue(
+        warnings,
+        "SCREEN_SOURCE_EMPTY",
+        "This screen has no visible HTML content. Preview is blank because the branch source is blank.",
+        path
+      );
+      continue;
+    }
+    const manifest = screenManifests.get(screenRoot);
+    const scaffoldOnly = summary.bodyTags.every((tag) =>
+      tag === "div" || tag === "main" || tag === "p" || /^h[1-6]$/u.test(tag)
+    );
+    const normalizedText = summary.text.replace(/\s+/gu, "").toLowerCase();
+    const scaffoldText = manifest
+      ? `${manifest.code}${manifest.name}`.replace(/\s+/gu, "").toLowerCase()
+      : "";
+    if (manifest && scaffoldOnly && normalizedText === scaffoldText) {
+      issue(
+        warnings,
+        "SCREEN_SOURCE_PLACEHOLDER",
+        "This screen still contains only its generated code and name.",
+        path
+      );
+    }
+  }
+
+  return {
+    ok: issues.length === 0,
+    issues,
+    warnings,
+    fileCount: files.length,
+    byteSize
+  };
 }
 
 export function assertValidRepositoryFiles(files: readonly RepositoryFile[]): RepositoryValidationResult {
