@@ -53,8 +53,18 @@ import {
 } from "./repository-cache";
 import type { CheckoutState, CliCredential, PendingCommit } from "./types";
 
+declare const __STRUCTVIBE_CLI_VERSION__: string;
+
 const program = new Command();
-program.name("sv").description("StructVibe repository CLI").version("0.3.0").option("--json", "machine-readable output");
+program
+  .name("sv")
+  .description("StructVibe repository CLI")
+  .version(
+    typeof __STRUCTVIBE_CLI_VERSION__ === "undefined"
+      ? "development"
+      : __STRUCTVIBE_CLI_VERSION__
+  )
+  .option("--json", "machine-readable output");
 const jsonOutput = () => Boolean(program.opts().json);
 
 async function ensureEmptyDirectory(path: string) {
