@@ -40,6 +40,17 @@ test("accepts deterministic HTML, CSS, inline SVG, and internal screen links", (
   assert.equal(result.ok, true, JSON.stringify(result.issues));
 });
 
+test("accepts safe semantic inline tags and commercial SVG presentation", () => {
+  const result = validateRepositoryFiles(repository(`<html><body><main>
+    <p><em>Improving</em> <i class="meter"></i></p>
+    <svg viewBox="0 0 100 40"><defs><linearGradient id="line"><stop offset="0" stop-color="#246f4e"></stop></linearGradient></defs>
+      <path d="M2 30h96" fill="none" stroke="url(#line)" stroke-width="2" stroke-dasharray="4 3"></path>
+      <text x="50" y="20" text-anchor="middle" font-size="10">82%</text>
+    </svg>
+  </main></body></html>`));
+  assert.equal(result.ok, true, JSON.stringify(result.issues));
+});
+
 test("blocks external or cross-screen stylesheets", () => {
   const result = validateRepositoryFiles(repository(`<!doctype html><html><head>
     <link rel="stylesheet" href="https://attacker.example/theme.css">

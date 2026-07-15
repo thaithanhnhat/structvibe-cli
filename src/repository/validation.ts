@@ -16,15 +16,15 @@ const MAX_HTML_DEPTH = 64;
 const MAX_CSS_NODES = 40_000;
 
 const allowedHtmlTags = new Set([
-  "a", "article", "aside", "body", "button", "dd", "div", "dl", "dt", "fieldset", "footer",
+  "a", "article", "aside", "body", "button", "dd", "div", "dl", "dt", "em", "fieldset", "footer",
   "form", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hr", "html", "img", "input", "label",
-  "legend", "li", "link", "main", "meta", "nav", "ol", "option", "p", "section", "select", "small", "span",
+  "i", "legend", "li", "link", "main", "meta", "nav", "ol", "option", "p", "section", "select", "small", "span",
   "strong", "style", "textarea", "title", "ul"
 ]);
 
 const allowedSvgTags = new Set([
   "svg", "g", "path", "circle", "rect", "line", "polyline", "polygon", "ellipse", "text", "tspan",
-  "defs", "lineargradient", "radialgradient", "stop", "clippath", "mask", "symbol", "use"
+  "defs", "lineargradient", "radialgradient", "stop", "clippath", "mask", "symbol", "use", "pattern", "marker"
 ]);
 
 const globalAttributes = new Set([
@@ -39,8 +39,13 @@ const htmlAttributes = new Set([
 const svgAttributes = new Set([
   "xmlns", "viewbox", "x", "y", "x1", "x2", "y1", "y2", "width", "height", "rx", "ry", "cx", "cy",
   "r", "d", "points", "fill", "fill-rule", "fill-opacity", "stroke", "stroke-width", "stroke-linecap",
-  "stroke-linejoin", "stroke-opacity", "opacity", "transform", "preserveaspectratio", "gradientunits",
-  "gradienttransform", "offset", "stop-color", "stop-opacity", "clip-path", "mask", "aria-hidden", "focusable"
+  "stroke-linejoin", "stroke-miterlimit", "stroke-dasharray", "stroke-dashoffset", "stroke-opacity", "opacity",
+  "transform", "vector-effect", "preserveaspectratio", "gradientunits", "gradienttransform", "spreadmethod",
+  "fx", "fy", "fr", "pathlength", "offset", "stop-color", "stop-opacity", "clip-path", "clippathunits",
+  "mask", "maskunits", "maskcontentunits", "refx", "refy", "markerwidth", "markerheight", "orient",
+  "marker-start", "marker-mid", "marker-end", "patternunits", "patterncontentunits", "patterntransform",
+  "text-anchor", "dominant-baseline", "font-family", "font-size", "font-weight", "letter-spacing",
+  "aria-hidden", "focusable"
 ]);
 
 const allowedAtRules = new Set(["media", "container", "supports", "layer"]);
